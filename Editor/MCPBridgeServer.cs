@@ -491,7 +491,7 @@ namespace UnityMCP.Editor
                         SendJson(response, 413, new { error = $"Request body too large ({request.ContentLength64} bytes; limit {MaxRequestBodyBytes})." });
                         return;
                     }
-                    using (var reader = new StreamReader(request.InputStream, request.ContentEncoding))
+                    using (var reader = new StreamReader(request.InputStream, System.Text.Encoding.UTF8))
                         body = ReadBounded(reader, MaxRequestBodyBytes);
                     if (body == null)
                     {
