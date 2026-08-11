@@ -1220,6 +1220,8 @@ namespace UnityMCP.Editor
                     return MCPScreenshotCommands.CaptureGameView(ParseJson(body));
                 case "screenshot/scene":
                     return MCPScreenshotCommands.CaptureSceneView(ParseJson(body));
+                case "screenshot/scene-status":
+                    return MCPScreenshotCommands.CheckSceneViewCaptureStatus(ParseJson(body));
                 case "screenshot/editor-window":
                     return MCPScreenshotCommands.CaptureEditorWindow(ParseJson(body));
                 case "sceneview/info":

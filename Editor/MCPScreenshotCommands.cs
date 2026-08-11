@@ -44,6 +44,11 @@ namespace UnityMCP.Editor
 
         // ─── Capture Scene View ───
 
+        // Fields for async gizmo capture (includeGizmos=true)
+        private static string s_gizmoPendingPath;
+        private static bool s_gizmoCapturePending;
+        private static int s_gizmoRepaintCount;
+
         public static object CaptureSceneView(Dictionary<string, object> args)
         {
             string path = args.ContainsKey("path") ? args["path"].ToString() : "";
@@ -52,6 +57,7 @@ namespace UnityMCP.Editor
 
             int width = args.ContainsKey("width") ? Convert.ToInt32(args["width"]) : 1920;
             int height = args.ContainsKey("height") ? Convert.ToInt32(args["height"]) : 1080;
+            bool includeGizmos = args.ContainsKey("includeGizmos") && Convert.ToBoolean(args["includeGizmos"]);
 
             var sceneView = SceneView.lastActiveSceneView;
             if (sceneView == null)
@@ -62,6 +68,33 @@ namespace UnityMCP.Editor
             if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir))
                 Directory.CreateDirectory(dir);
 
+            if (includeGizmos)
+            {
+                // Gizmos are an editor overlay, not part of the Camera render pipeline.
+                // Camera.Render() to RenderTexture only captures 3D objects, not Gizmos.
+                // To capture Gizmos, we must ReadPixels from the screen framebuffer during
+                // a SceneView Repaint event (when the overlay is actually drawn).
+                s_gizmoPendingPath = path;
+                s_gizmoRepaintCount = 0;
+                s_gizmoCapturePending = true;
+
+                SceneView.duringSceneGui -= OnSceneGUIForGizmoCapture;
+                SceneView.duringSceneGui += OnSceneGUIForGizmoCapture;
+
+                // Force repaint to trigger the callback
+                sceneView.Focus();
+                sceneView.Repaint();
+
+                return new Dictionary<string, object>
+                {
+                    { "success", true },
+                    { "path", path },
+                    { "includeGizmos", true },
+                    { "message", "Gizmo capture scheduled. File will be saved on next SceneView Repaint. Poll with screenshot/scene?status=true&path=<path> to check." },
+                };
+            }
+
+            // Standard path: Camera.Render() to RenderTexture (no Gizmos)
             var camera = sceneView.camera;
             var rt = new RenderTexture(width, height, 24);
             camera.targetTexture = rt;
@@ -91,6 +124,126 @@ namespace UnityMCP.Editor
                 { "height", height },
                 { "sizeBytes", bytes.Length },
             };
+        }
+
+        // ─── Check Gizmo Capture Status ───
+
+        public static object CheckSceneViewCaptureStatus(Dictionary<string, object> args)
+        {
+            string path = args.ContainsKey("path") ? args["path"].ToString() : s_gizmoPendingPath;
+            if (string.IsNullOrEmpty(path))
+                return new { error = "path is required" };
+
+            if (!File.Exists(path))
+                return new Dictionary<string, object>
+                {
+                    { "success", true },
+                    { "status", "pending" },
+                    { "message", "File not created yet" },
+                };
+
+            long size = new FileInfo(path).Length;
+            bool done = !s_gizmoCapturePending && size > 2000;
+
+            return new Dictionary<string, object>
+            {
+                { "success", true },
+                { "status", done ? "done" : "pending" },
+                { "path", path },
+                { "sizeBytes", size },
+                { "repaintCount", s_gizmoRepaintCount },
+            };
+        }
+
+        // ─── duringSceneGui callback for gizmo capture ───
+
+        private static void OnSceneGUIForGizmoCapture(SceneView sv)
+        {
+            if (!s_gizmoCapturePending) return;
+            if (Event.current == null || Event.current.type != EventType.Repaint)
+                return;
+
+            s_gizmoRepaintCount++;
+
+            // Wait a few repaints to ensure the framebuffer is fully rendered
+            if (s_gizmoRepaintCount < 3)
+            {
+                sv.Repaint();
+                return;
+            }
+
+            s_gizmoCapturePending = false;
+            SceneView.duringSceneGui -= OnSceneGUIForGizmoCapture;
+
+            // Use DockArea.screenPosition to get the full window rect (includes tab bar + toolbar + viewport)
+            // sv.position does not include the bottom tab bar area
+            var hostViewField = sv.GetType().GetField("m_Parent", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+            var dockArea = hostViewField?.GetValue(sv);
+            var screenPos = dockArea != null
+                ? (Rect)dockArea.GetType().GetProperty("screenPosition").GetValue(dockArea)
+                : sv.position;
+
+            string path = s_gizmoPendingPath;
+
+#if UNITY_EDITOR_OSX
+            // macOS: use screencapture command (logical point coordinates, matches screenPosition)
+            int sx = Mathf.RoundToInt(screenPos.x);
+            int sy = Mathf.RoundToInt(screenPos.y);
+            int sw = Mathf.RoundToInt(screenPos.width);
+            int sh = Mathf.RoundToInt(screenPos.height);
+
+            var psi = new System.Diagnostics.ProcessStartInfo("screencapture", $"-R {sx},{sy},{sw},{sh} \"{path}\"")
+            {
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardError = true,
+            };
+            var proc = System.Diagnostics.Process.Start(psi);
+            proc?.WaitForExit(5000);
+
+            long size = File.Exists(path) ? new FileInfo(path).Length : 0;
+            AssetDatabase.Refresh();
+            Debug.Log($"[MCPScreenshot] Gizmo capture (screencapture) saved: {path} size={size} rect=({sx},{sy},{sw},{sh})");
+#elif UNITY_EDITOR_WIN
+            // Windows: use PrintWindow or BitBlt from the window handle
+            // Fallback to ReadPixels with physical pixel coordinates
+            float ppp = EditorGUIUtility.pixelsPerPoint;
+            int x = Mathf.RoundToInt(screenPos.x * ppp);
+            int y = Mathf.RoundToInt(screenPos.y * ppp);
+            int w = Mathf.RoundToInt(screenPos.width * ppp);
+            int h = Mathf.RoundToInt(screenPos.height * ppp);
+            int screenH = Screen.currentResolution.height;
+            int flippedY = screenH - y - h;
+
+            RenderTexture.active = null;
+            var tex = new Texture2D(w, h, TextureFormat.RGB24, false);
+            tex.ReadPixels(new Rect(x, flippedY, w, h), 0, 0);
+            tex.Apply();
+            byte[] bytes = tex.EncodeToPNG();
+            File.WriteAllBytes(path, bytes);
+            UnityEngine.Object.DestroyImmediate(tex);
+            AssetDatabase.Refresh();
+            Debug.Log($"[MCPScreenshot] Gizmo capture (ReadPixels) saved: {path} size={bytes.Length}");
+#else
+            // Linux: fallback to ReadPixels
+            float ppp = EditorGUIUtility.pixelsPerPoint;
+            int x = Mathf.RoundToInt(screenPos.x * ppp);
+            int y = Mathf.RoundToInt(screenPos.y * ppp);
+            int w = Mathf.RoundToInt(screenPos.width * ppp);
+            int h = Mathf.RoundToInt(screenPos.height * ppp);
+            int screenH = Screen.currentResolution.height;
+            int flippedY = screenH - y - h;
+
+            RenderTexture.active = null;
+            var tex = new Texture2D(w, h, TextureFormat.RGB24, false);
+            tex.ReadPixels(new Rect(x, flippedY, w, h), 0, 0);
+            tex.Apply();
+            byte[] bytes = tex.EncodeToPNG();
+            File.WriteAllBytes(path, bytes);
+            UnityEngine.Object.DestroyImmediate(tex);
+            AssetDatabase.Refresh();
+            Debug.Log($"[MCPScreenshot] Gizmo capture (ReadPixels) saved: {path} size={bytes.Length}");
+#endif
         }
 
         // ─── Get Scene View Camera Info ───

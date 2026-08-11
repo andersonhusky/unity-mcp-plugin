@@ -226,6 +226,7 @@ namespace UnityMCP.Editor
             "screenshot/editor-window",
             "screenshot/game",
             "screenshot/scene",
+            "screenshot/scene-status",
             "script/create",
             "script/read",
             "script/update",
