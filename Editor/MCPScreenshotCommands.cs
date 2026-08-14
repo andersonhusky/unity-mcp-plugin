@@ -2,7 +2,6 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 #if UNITY_EDITOR_WIN
-using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 #endif
@@ -591,7 +590,7 @@ namespace UnityMCP.Editor
 
         static (int pid, IntPtr main) ProcInfo()
         {
-            using (var p = Process.GetCurrentProcess()) return (p.Id, p.MainWindowHandle);
+            using (var p = System.Diagnostics.Process.GetCurrentProcess()) return (p.Id, p.MainWindowHandle);
         }
 
         // A floating EditorWindow's OS window carries its tab title (or type name). Exact match,
